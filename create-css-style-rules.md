@@ -1,36 +1,32 @@
-# Programmatically Creating CSS Rules in Sitevision (Edit API)
+# Programmatically Managing CSS Rules in Sitevision (Edit API)
 
-Sitevision stores the site-wide CSS rule library (shown in any layer's **Properties → Style (CSS) → CSS rules** dropdown) in one server object: the **decorationsTab**. Fast method = GET that object, append to its `cssClasses` array, PUT it back. Run everything from the browser JS console **while logged into the Sitevision editor**.
+Sitevision stores the site-wide CSS rule library (shown in any layer's **Properties → Style (CSS) → CSS rules** dropdown) in one server object: the **decorationsTab**. All operations = GET that object, modify its `cssClasses` array, PUT it back. Run from browser JS console **while logged into the Sitevision editor**.
 
-## Step 1 — Get your IDs (no hardcoding)
+## Step 1 — Get your IDs
 
-Read them from the current editor URL so the script works on any site. Editor URL pattern: `https://<host>/edit/<SITE_NODE_ID>/...`
-
-```js
-const SITE = location.pathname.split('/')[2];   // SITE_NODE_ID from URL
-const BASE = "/edit-api/1/" + SITE;
-```
-
-You also need the `DECORATION_NODE_ID` (node owning decorations/CSS rules). Find it: open Settings (gear) → Site settings → Decorations, watch Network — the `.../decorationsTab/<DECORATION_NODE_ID>` request reveals it. Capture programmatically:
+`SITE_NODE_ID` comes from the editor URL `https://<host>/edit/<SITE_NODE_ID>/...`. `DECORATION_NODE_ID` = the node owning decorations; **get it reliably from a `nodeLock` request URL**, not from performance entries (those proved unreliable and gave `undefined`).
 
 ```js
-// after opening Site settings → Decorations once, the request fires; grab from performance entries
-const NODE = performance.getEntriesByType('resource')
-  .map(e => (e.name.match(/\/decorationsTab\/([^/?]+)/) || [])[1])
+window.SITE = location.pathname.split('/')[2];
+window.BASE = "/edit-api/1/" + window.SITE;
+// NODE: open Settings(gear)→Site settings once, then in DevTools Network find the
+// request .../<NODE>/nodeLock  — copy that <NODE> id. Or grab via Resource Timing:
+window.NODE = performance.getEntriesByType('resource')
+  .map(e => (e.name.match(/\/([^/]+)\/nodeLock/) || [])[1])
   .filter(Boolean).pop();
-const URL_TAB = BASE + "/" + NODE + "/decorationsTab/" + NODE;
+window.URL_TAB = window.BASE + "/" + window.NODE + "/decorationsTab/" + window.NODE;
 ```
+
+Sanity check: `await getState()` (Step 4) must return an object with `cssClasses`. If you get **500** with `.../undefined/decorationsTab/undefined`, your NODE didn't resolve — set it manually from the nodeLock URL.
 
 ## Step 2 — Auth
 
-GET works with session cookie alone. All mutations (POST/PUT/DELETE) → **403** unless you send:
-- `X-CSRF-Token` (32 chars)
-- `X-Requested-With: XMLHttpRequest`
-- plus `Content-Type: application/json; charset=UTF-8`, `Accept: application/json`
+GET works with session cookie alone. All mutations (POST/PUT/DELETE) → **403** unless headers include:
+`X-CSRF-Token` (32 chars), `X-Requested-With: XMLHttpRequest`, `Content-Type: application/json; charset=UTF-8`, `Accept: application/json`.
 
 ## Step 3 — Capture CSRF token
 
-Token not in any global/meta. Intercept the header from a GUI mutation. Paste first:
+Not in any global/meta. Intercept from a GUI mutation. Paste first:
 
 ```js
 window.__csrf = null;
@@ -43,22 +39,20 @@ XMLHttpRequest.prototype.setRequestHeader = function(n,v){
 };
 ```
 
-Then trigger a mutation: open Settings (gear) → Site settings (acquires a node lock = POST carrying token). `window.__csrf` now set. **Cancel** the dialog to release the GUI lock (else collides with your script's lock). Token is session-scoped — re-capture after any editor reload.
+Then open Settings(gear) → Site settings (fires a nodeLock POST carrying the token). `window.__csrf` now set. **Cancel** the dialog to release the GUI's lock (else it collides with your script's lock). Re-capture after any editor reload — token is session-scoped.
 
 ## Step 4 — Helpers
 
 ```js
-const H = () => ({
-  'Content-Type':'application/json; charset=UTF-8',
-  'Accept':'application/json',
-  'X-CSRF-Token':window.__csrf,
-  'X-Requested-With':'XMLHttpRequest'
-});
-const lock   = () => fetch(BASE+"/"+NODE+"/nodeLock", {method:'POST', headers:H()});
-const unlock = () => fetch(BASE+"/"+NODE+"/nodeLock/"+NODE, {method:'DELETE', headers:H()});
-const getState = async () => (await fetch(URL_TAB,{headers:H()})).json();
-const putState = (s) => fetch(URL_TAB,{method:'PUT', headers:H(), body:JSON.stringify(s)});
+window.H = () => ({'Content-Type':'application/json; charset=UTF-8','Accept':'application/json',
+  'X-CSRF-Token':window.__csrf,'X-Requested-With':'XMLHttpRequest'});
+window.lock     = () => fetch(window.BASE+"/"+window.NODE+"/nodeLock",{method:'POST',headers:window.H()});
+window.unlock   = () => fetch(window.BASE+"/"+window.NODE+"/nodeLock/"+window.NODE,{method:'DELETE',headers:window.H()});
+window.getState = async () => (await fetch(window.URL_TAB,{headers:window.H()})).json();
+window.putState = (s) => fetch(window.URL_TAB,{method:'PUT',headers:window.H(),body:JSON.stringify(s)});
 ```
+
+Every mutation = `lock → getState → modify → putState → unlock`. A good PUT returns status 200 and body `{success:true}`.
 
 ## Step 5 — Data shape
 
@@ -69,72 +63,93 @@ GET returns `{decorations, archivedDecorations, cssClasses, archivedCssClasses}`
   "customCss":"padding: 10em 0;", "useCustomCss":true, "roleType":"allRoles" }
 ```
 
-Field rules:
-- `id` — **omit for new rules** (server generates). Existing rules echo their id back unchanged.
-- `name` — dropdown label, any chars OK.
-- `cssClassName` — actual HTML class, **validated** (see Step 6).
-- `customCss` — **declarations only, no selector wrapper** (write `padding:1rem;`, not `.p-4{...}`). Media queries nest LESS-style: `@media (max-width:1000px){ padding:0.5rem; }`.
+- `id` — **omit for new rules** (server generates). For updates, **keep it** (see Step 8).
+- `name` — dropdown label; any chars OK.
+- `cssClassName` — actual HTML class; **validated** (Step 6).
+- `customCss` — **declarations only, no selector wrapper** (`padding:1rem;`, not `.p-4{...}`). Media queries nest LESS-style: `@media (max-width:1000px){ padding:0.5rem; }`.
 - `useCustomCss` — `true` when supplying customCss.
 - `roleType` — `"allRoles"`.
 
-## Step 6 — Class name validation (big gotcha)
+## Step 6 — Class name validation (gotcha)
 
-`cssClassName` **cannot contain `/` or `.`** → returns **422** `{"success":false,"context":{"cssClasses":{"key":"cssClassNameInvalid"...}}}`. Looks like a "rule count cap" but isn't. Sanitize while keeping readable display name:
+`cssClassName` **cannot contain `/` or `.`** → **422** `{"success":false,"context":{"cssClasses":{"key":"cssClassNameInvalid"...}}}`. Sanitize, keep readable display name:
 
 ```js
 const sanitize = n => n.replace(/\//g,'-').replace(/\./g,'_'); // w-1/2→w-1-2, p-0.5→p-0_5
-const makeRule = (label, css) => ({ name:label, cssClassName:sanitize(label), customCss:css, useCustomCss:true, roleType:"allRoles" });
+const makeRule = (label,css) => ({name:label, cssClassName:sanitize(label), customCss:css, useCustomCss:true, roleType:"allRoles"});
 ```
 
-## Step 7 — Build rules
+## Step 7 — CREATE (chunked, idempotent)
 
-```js
-const newRules = [
-  makeRule("p-4","padding:1rem;"),
-  makeRule("flex","display:flex;"),
-  makeRule("grid-cols-12","grid-template-columns:repeat(12,minmax(0,1fr));"),
-];
-```
-
-## Step 8 — Upload loop (chunked, idempotent)
-
-Don't PUT everything at once — chunk 15–20 per PUT. Re-fetch each loop, dedupe by `cssClassName` so re-runs are safe.
+Don't PUT everything at once — chunk 15–20 per PUT (~40KB payload was fine). Re-fetch each loop, dedupe by `cssClassName`.
 
 ```js
 async function uploadRules(rules, CHUNK=15){
   const log=[];
   for(let i=0;i<rules.length;i+=CHUNK){
-    await lock();
-    const st = await getState();
+    await window.lock();
+    const st = await window.getState();
     const have = new Set(st.cssClasses.map(c=>(c.cssClassName||'').toLowerCase()));
     let added=0;
-    for(const r of rules.slice(i,i+CHUNK)){
+    for(const r of rules.slice(i,i+CHUNK))
       if(!have.has(r.cssClassName.toLowerCase())){ st.cssClasses.push(r); have.add(r.cssClassName.toLowerCase()); added++; }
-    }
-    const res = await putState(st);
+    const res = await window.putState(st);
     let ok=false; try{ ok=(await res.clone().json()).success; }catch(e){}
     log.push({i,added,status:res.status,ok,total:st.cssClasses.length});
-    await unlock();
-    if(res.status!==200||!ok) break; // stop on failure; inspect body for offending class name
+    await window.unlock();
+    if(res.status!==200||!ok) break; // stop on failure; body names the bad class
   }
   return log;
 }
-const result = await uploadRules(newRules); console.log(result);
+// const result = await uploadRules([ makeRule("p-4","padding:1rem;"), makeRule("flex","display:flex;") ]);
 ```
 
-Healthy run: every chunk `status:200`, `ok:true`, rising `total`. A 422 stops the loop — the response names the bad `cssClassName`.
+Healthy run: every chunk `status:200`, `ok:true`, rising `total`.
+
+## Step 8 — UPDATE & DELETE (tested ✓)
+
+Same cycle. **Update = find existing entry, mutate in place, KEEP its `id`.** If you drop the id (or push a new same-name object), the server creates a **duplicate** — confirmed live (server permits duplicate class names).
+
+```js
+// UPDATE — preserves id, no duplicate
+async function updateRule(cssClassName, patch){
+  await window.lock();
+  const st = await window.getState();
+  const rule = st.cssClasses.find(c => c.cssClassName === cssClassName); // matched entry keeps its id
+  if (rule) Object.assign(rule, patch);                                  // edit in place
+  const res = await window.putState(st);
+  let ok=false; try{ ok=(await res.clone().json()).success; }catch(e){}
+  await window.unlock();
+  return { found: !!rule, status: res.status, ok };
+}
+// updateRule("p-4", { customCss:"padding:1.25rem;", name:"p-4" });
+
+// DELETE — hard removal (does NOT go to archivedCssClasses; verified)
+async function deleteRule(cssClassName){
+  await window.lock();
+  const st = await window.getState();
+  const before = st.cssClasses.length;
+  st.cssClasses = st.cssClasses.filter(c => c.cssClassName !== cssClassName); // removes ALL matches
+  const res = await window.putState(st);
+  let ok=false; try{ ok=(await res.clone().json()).success; }catch(e){}
+  await window.unlock();
+  return { removed: before - st.cssClasses.length, status: res.status, ok };
+}
+```
+
+Notes: renaming `cssClassName` obeys Step 6 validation, and **breaks any layer/page already using the old class** (only the definition changes, not references). `deleteRule` removes every entry with that class name — handy for clearing accidental duplicates.
 
 ## Step 9 — Verify
 
 ```js
-const after = await getState();
+const after = await window.getState();
 const names = new Set(after.cssClasses.map(c=>c.cssClassName));
-const missing = newRules.map(r=>r.cssClassName).filter(n=>!names.has(n));
-console.log({total:after.cssClasses.length, missing}); // missing should be []
+console.log({ total: after.cssClasses.length });
+// for creates: const missing = expected.filter(n=>!names.has(n));  // should be []
 ```
 
-Then reload editor (in-memory model is stale until reload) → right-click any layer → Properties → Style (CSS) → type in CSS rules field → new rules appear.
+Then reload the editor (in-memory model is stale until reload) → right-click any layer → Properties → Style (CSS) → type in the CSS rules field → changes appear.
 
 ## Gotchas (quick ref)
 
-403 on mutation = missing `X-CSRF-Token`, not permissions. 422 "count limit" = actually `/` or `.` in `cssClassName`. New rules omit `id`. `customCss` = declarations only, no wrapper. Re-fetch + dedupe inside loop = re-runnable. Re-capture token after editor reload.
+403 on mutation = missing `X-CSRF-Token`. 422 "count limit" = actually `/` or `.` in `cssClassName`. 500 with `undefined` in URL = NODE id didn't resolve (get it from a `nodeLock` URL). New rules omit `id`; **updates must keep `id`** or you get a duplicate (server allows dup class names). `customCss` = declarations only, no wrapper. Delete is a hard removal, not archived. Re-fetch + dedupe inside loops = re-runnable. Re-capture token after editor reload. Always Cancel the GUI Site-settings dialog before scripting so its lock doesn't collide with yours.
