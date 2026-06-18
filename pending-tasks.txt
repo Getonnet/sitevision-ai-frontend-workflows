@@ -1,0 +1,5 @@
+update this guide to add general instruction for navigating the layer panel, adding new layer by right clicking any parent > add layout > vertical. drag and drop layers to organize/move children(s). adding module by using the title="Modules" button inside top toolbar `id="toolbar"`
+
+Using the top toolbar, we add text and image and other custom or default modules. the eye icon in the top toolbar lets you go into responsive mode and check site in mobile and tablet without leave sitevision editor page.
+
+to add a background image to a layer, you need to use the 
